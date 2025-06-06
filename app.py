@@ -1,107 +1,106 @@
-
 from flask import Flask, request, render_template_string, redirect
 import subprocess
 import threading
 import time
 import cv2
 from ultralytics import YOLO
-from hx711 import HX711
-import RPi.GPIO as GPIO
+
+# Servo control imports
+from gpiozero import Servo
+from time import sleep
+import os
+
+# Ensure gpiozero uses the native pin factory (needed if running as root)
+os.environ["GPIOZERO_PIN_FACTORY"] = "native"
 
 app = Flask(__name__)
 
-# Load YOLOv8n model
+# Load YOLOv8n model (make sure ultralytics is installed and yolov8n.pt is available)
 model = YOLO('yolov8n.pt')
 
-# HX711 setup
-hx = HX711(5, 6)
-try:
-    hx.tare()
-    print("Tare complete. Starting weight should be 0g.")
-except AttributeError:
-    print("Tare method not available in HX711 library.")
+# Initialize servo on GPIO pin 17
+servo = Servo(17)
 
-REFERENCE_UNIT = 2280
-
-def get_weight():
-    raw_weight = hx.get_weight(5)
-    calibrated_weight = raw_weight / REFERENCE_UNIT
-    return calibrated_weight
-
-# Servo setup
-SERVO_PIN = 17
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(SERVO_PIN, GPIO.OUT)
-servo_pwm = GPIO.PWM(SERVO_PIN, 50)  # 50Hz for SG90
-servo_pwm.start(0)  # Initial position
-
-def move_servo():
-    print("Rotating servo...")
-    servo_pwm.ChangeDutyCycle(2.5)  # 0°
-    time.sleep(0.5)
-    servo_pwm.ChangeDutyCycle(7.5)  # 90°
-    time.sleep(1)
-    servo_pwm.ChangeDutyCycle(2.5)  # back to 0°
-    time.sleep(0.5)
-    servo_pwm.ChangeDutyCycle(0)  # Stop signal
-
+# Store user internet time left: {client_ip: seconds}
 user_times = {}
+
+# Lock to avoid race conditions on user_times
 lock = threading.Lock()
 
+# HTML template with Insert (scan) and Claim buttons
 HTML_PAGE = """
 <html><body>
-<h2>Welcome to BottleScan Captive Portal</h2>
-<p>Your IP: {{ ip }}</p>
-<p>Internet Access Time Left: {{ time_left }} seconds</p>
-<form method="POST" action="/insert">
-    <button type="submit">Insert Bottle (Scan)</button>
-</form>
-<form method="POST" action="/claim">
-    <button type="submit">Claim Access</button>
-</form>
+  <h2>Welcome to BottleScan Captive Portal</h2>
+  <p>Your IP: {{ ip }}</p>
+  <p>Internet Access Time Left: {{ time_left }} seconds</p>
+  <form method="POST" action="/insert">
+      <button type="submit">Insert Bottle (Scan)</button>
+  </form>
+  <form method="POST" action="/claim">
+      <button type="submit">Claim Access</button>
+  </form>
 </body></html>
 """
 
 def get_client_ip():
+    # If behind a proxy, you might need to use X-Forwarded-For:
+    # return request.headers.get('X-Forwarded-For', request.remote_addr)
     return request.remote_addr
 
 def grant_internet(ip):
-    subprocess.run(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Remove any existing DROP rule (in case it's there), then allow traffic
+    subprocess.run(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"Granted internet to {ip}")
 
 def block_internet(ip):
-    subprocess.run(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Remove any existing DROP rule first, then insert a new one
+    subprocess.run(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["sudo", "iptables", "-I", "FORWARD", "-s", ip, "-j", "DROP"])
     print(f"Blocked internet to {ip}")
 
 def internet_timer():
+    """
+    Background thread that decrements each user's remaining time every second.
+    When time hits zero, block their internet and remove them from user_times.
+    """
     while True:
         time.sleep(1)
         with lock:
-            remove_ips = []
-            for ip, seconds in list(user_times.items()):
-                if seconds > 0:
-                    user_times[ip] -= 1
+            to_remove = []
+            for ip, remaining in user_times.items():
+                if remaining > 0:
+                    user_times[ip] = remaining - 1
                 if user_times[ip] <= 0:
+                    # Time is up: block internet and mark for removal
                     block_internet(ip)
-                    remove_ips.append(ip)
-            for ip in remove_ips:
-                user_times.pop(ip)
+                    to_remove.append(ip)
+            for ip in to_remove:
+                user_times.pop(ip, None)
 
 def scan_bottle(timeout=10):
+    """
+    Capture frames from the default camera and run YOLO inference until a bottle is detected
+    (class 39 in COCO) with sufficient size, or until timeout.
+    When a bottle is detected, trigger the servo to open/close and return True.
+    """
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Cannot open camera")
         return False
 
     start_time = time.time()
+
     while True:
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame")
             break
 
+        # Run the YOLO model on the current frame
         results = model(frame)[0]
+
         for box in results.boxes:
             bbox = box.xyxy[0].cpu().numpy()
             xmin, ymin, xmax, ymax = bbox
@@ -109,13 +108,21 @@ def scan_bottle(timeout=10):
             height = ymax - ymin
             cls = int(box.cls.cpu().numpy())
 
+            # Class 39 corresponds to "bottle" in COCO; check size threshold
             if cls == 39 and (width > 100 or height > 100):
-                print(f"Bottle detected: {width:.1f}x{height:.1f}")
+                print(f"Bottle detected with size: {width:.1f}x{height:.1f}")
+
+                # Move servo to "open" position
+                servo.max()
+                sleep(1)         # Hold for 1 second
+                servo.min()      # Move back to "closed" position
+
                 cap.release()
                 return True
 
+        # Check for timeout
         if time.time() - start_time > timeout:
-            print("Timeout: No bottle detected")
+            print("Timeout reached, no bottle detected")
             break
 
     cap.release()
@@ -131,22 +138,14 @@ def index():
 @app.route('/insert', methods=['POST'])
 def insert():
     ip = get_client_ip()
-
-    weight = get_weight()
-    print(f"Weight detected: {weight:.2f}g")
-
-    if weight > 150:
-        return f"Bottle too heavy ({weight:.2f}g). Max is 150g.", 400
-
     bottle_detected = scan_bottle()
-
     if bottle_detected:
         with lock:
-            user_times[ip] = user_times.get(ip, 0) + 60  # Add 1 minute
-        move_servo()  # 🚀 Trigger servo movement after accepted bottle
+            # Add 60 seconds of internet time for this IP
+            user_times[ip] = user_times.get(ip, 0) + 60
         return redirect('/')
     else:
-        return "Bottle not detected or too small. Try again.", 400
+        return "Bottle not detected or too small, try again", 400
 
 @app.route('/claim', methods=['POST'])
 def claim():
@@ -156,13 +155,10 @@ def claim():
             grant_internet(ip)
             return redirect('/')
         else:
-            return "No internet time to claim. Insert a bottle first.", 400
+            return "No internet time to claim; insert bottle first", 400
 
 if __name__ == '__main__':
-    try:
-        threading.Thread(target=internet_timer, daemon=True).start()
-        app.run(host='0.0.0.0', port=80)
-    finally:
-        servo_pwm.stop()
-        GPIO.cleanup()
-	
+    # Start the internet timer thread
+    threading.Thread(target=internet_timer, daemon=True).start()
+    # Run Flask app on port 80, accessible from any interface
+    app.run(host='0.0.0.0', port=80)
