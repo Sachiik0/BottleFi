@@ -21,18 +21,75 @@ user_times = {}
 lock = threading.Lock()
 
 HTML_PAGE = """
-<html><body>
-<h2>Welcome to BottleScan Captive Portal</h2>
-<p>Your IP: {{ ip }}</p>
-<p>Internet Access Time Left: {{ time_left }} seconds</p>
-<form method="POST" action="/insert">
-    <button type="submit">Insert Bottle (Scan)</button>
-</form>
-<form method="POST" action="/claim">
-    <button type="submit">Claim Access</button>
-</form>
-</body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>BottleScan Captive Portal</title>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Montserrat', sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .card {
+            background: white;
+            padding: 2rem;
+            border-radius: 16px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 100%;
+            max-width: 400px;
+        }
+        h2 {
+            margin-bottom: 1rem;
+            color: #333;
+        }
+        p {
+            margin: 0.5rem 0;
+            color: #555;
+        }
+        form {
+            margin-top: 1.5rem;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 0.5rem;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Welcome to BottleScan</h2>
+        <p><strong>Your IP:</strong> {{ ip }}</p>
+        <p><strong>Internet Access Time Left:</strong> {{ time_left }} seconds</p>
+        <form method="POST" action="/insert">
+            <button type="submit">Insert Bottle (Scan)</button>
+        </form>
+        <form method="POST" action="/claim">
+            <button type="submit">Claim Internet Access</button>
+        </form>
+    </div>
+</body>
+</html>
 """
+
 
 def get_client_ip():
     return request.remote_addr
