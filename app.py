@@ -4,12 +4,12 @@ import threading
 import time
 import cv2
 from ultralytics import YOLO
-from gpiozero import Servo
+from gpiozero import PWMOutputDevice
 from gpiozero.pins.pigpio import PiGPIOFactory
 
 # Use PiGPIO backend for proper PWM control
 factory = PiGPIOFactory()
-servo = Servo(17, pin_factory=factory)
+servo = PWMOutputDevice(17, pin_factory=factory, frequency=50)
 
 app = Flask(__name__)
 
@@ -86,12 +86,12 @@ def scan_bottle(timeout=10):
             if cls == 39 and (width > 100 or height > 100):  # bottle class
                 print(f"Bottle detected with size: {width:.1f}x{height:.1f}")
                 
-                # Move servo to push bottle or show response
-                servo.max()  # move to one side
+                # Activate continuous rotation servo
+                servo.value = 1.0  # rotate one direction
                 time.sleep(1)
-                servo.min()  # move to other side
+                servo.value = -1.0  # rotate opposite direction
                 time.sleep(1)
-                servo.mid()  # back to center
+                servo.value = 0.0  # stop
 
                 cap.release()
                 return True
