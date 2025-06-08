@@ -4,92 +4,54 @@ import threading
 import time
 import cv2
 from ultralytics import YOLO
-from gpiozero import PWMOutputDevice
-from gpiozero.pins.pigpio import PiGPIOFactory
+from hx711 import HX711
+import pigpio
 
-# Use PiGPIO backend for proper PWM control
-factory = PiGPIOFactory()
-servo = PWMOutputDevice(17, pin_factory=factory, frequency=50)
-
+# Flask app
 app = Flask(__name__)
 
 # Load YOLOv8n model
 model = YOLO('yolov8n.pt')
 
-# IP -> time left in seconds
+# HX711 setup
+hx = HX711(5, 6)  # DOUT = 5, PD_SCK = 6
+hx.set_scale(2280)  # Adjust after calibration
+hx.tare()
+print("HX711 tared. Ready to measure weight.")
+
+# pigpio setup for servo
+SERVO_GPIO = 17  # Use GPIO pin 17 (physical pin 11)
+pi = pigpio.pi()
+if not pi.connected:
+    raise RuntimeError("Could not connect to pigpio daemon")
+
+def activate_servo():
+    print("Activating servo...")
+    pi.set_servo_pulsewidth(SERVO_GPIO, 1000)  # Position 1
+    time.sleep(1)
+    pi.set_servo_pulsewidth(SERVO_GPIO, 2000)  # Position 2
+    time.sleep(1)
+    pi.set_servo_pulsewidth(SERVO_GPIO, 0)     # Stop signal
+    print("Servo movement complete")
+
+# Track user internet time
 user_times = {}
 lock = threading.Lock()
 
+# HTML template
 HTML_PAGE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>BottleScan Captive Portal</title>
-    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600&display=swap" rel="stylesheet">
-    <style>
-        body {
-            font-family: 'Montserrat', sans-serif;
-            background: #f0f2f5;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-        }
-        .card {
-            background: white;
-            padding: 2rem;
-            border-radius: 16px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
-            text-align: center;
-            width: 100%;
-            max-width: 400px;
-        }
-        h2 {
-            margin-bottom: 1rem;
-            color: #333;
-        }
-        p {
-            margin: 0.5rem 0;
-            color: #555;
-        }
-        form {
-            margin-top: 1.5rem;
-        }
-        button {
-            background-color: #4CAF50;
-            color: white;
-            padding: 12px 24px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 1rem;
-            font-weight: 600;
-            margin: 0.5rem;
-            transition: background-color 0.3s ease;
-        }
-        button:hover {
-            background-color: #45a049;
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2>Welcome to BottleScan</h2>
-        <p><strong>Your IP:</strong> {{ ip }}</p>
-        <p><strong>Internet Access Time Left:</strong> {{ time_left }} seconds</p>
-        <form method="POST" action="/insert">
-            <button type="submit">Insert Bottle (Scan)</button>
-        </form>
-        <form method="POST" action="/claim">
-            <button type="submit">Claim Internet Access</button>
-        </form>
-    </div>
-</body>
-</html>
+<html><body>
+<h2>Welcome to BottleScan Captive Portal</h2>
+<p>Your IP: {{ ip }}</p>
+<p>Internet Access Time Left: {{ time_left }} seconds</p>
+<form method="POST" action="/insert">
+    <button type="submit">Insert Bottle (Scan)</button>
+</form>
+<form method="POST" action="/claim">
+    <button type="submit">Claim Access</button>
+</form>
+</body></html>
 """
-
 
 def get_client_ip():
     return request.remote_addr
@@ -115,50 +77,57 @@ def internet_timer():
                     block_internet(ip)
                     expired_ips.append(ip)
             for ip in expired_ips:
-                user_times.pop(ip)
+                del user_times[ip]
 
-def scan_bottle(timeout=10):
+def scan_bottle(timeout=5, max_weight=150):
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Cannot open camera")
         return False
 
     start_time = time.time()
+    bottle_detected = False
 
-    while True:
+    while time.time() - start_time < timeout:
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame")
             break
 
         results = model(frame)[0]
-
         for box in results.boxes:
-            bbox = box.xyxy[0].cpu().numpy()
-            xmin, ymin, xmax, ymax = bbox
-            width = xmax - xmin
-            height = ymax - ymin
             cls = int(box.cls.cpu().numpy())
+            if cls == 39:  # 'bottle' class in COCO
+                bbox = box.xyxy[0].cpu().numpy()
+                xmin, ymin, xmax, ymax = bbox
+                width = xmax - xmin
+                height = ymax - ymin
 
-            if cls == 39 and (width > 100 or height > 100):  # bottle class
-                print(f"Bottle detected with size: {width:.1f}x{height:.1f}")
-                
-                # Activate continuous rotation servo
-                servo.value = 1.0  # rotate one direction
-                time.sleep(1)
-                servo.value = -1.0  # rotate opposite direction
-                time.sleep(1)
-                servo.value = 0.0  # stop
+                if width > 100 or height > 340:
+                    print(f"Bottle detected: {width:.1f}x{height:.1f}")
+                    bottle_detected = True
+                    break
 
-                cap.release()
-                return True
-
-        if time.time() - start_time > timeout:
-            print("Timeout reached, no bottle detected")
+        if bottle_detected:
             break
 
     cap.release()
-    return False
+
+    if bottle_detected:
+        print("Measuring weight...")
+        weight = hx.get_weight(5)
+        print(f"Weight: {weight:.2f} g")
+        
+        if weight <= max_weight:
+            print("Bottle accepted")
+            activate_servo()
+            return True
+        else:
+            print("Bottle rejected: too heavy")
+            return False
+    else:
+        print("No bottle detected")
+        return False
 
 @app.route('/', methods=['GET'])
 def index():
@@ -173,10 +142,12 @@ def insert():
     bottle_detected = scan_bottle()
     if bottle_detected:
         with lock:
-            user_times[ip] = user_times.get(ip, 0) + 60
+            user_times[ip] = user_times.get(ip, 0) + 60  # Add 60 seconds
+            hx.tare()
+            print("Scale reset to 0g")
         return redirect('/')
     else:
-        return "Bottle not detected or too small, try again", 400
+        return "Bottle not detected, too heavy, or too small. Try again.", 400
 
 @app.route('/claim', methods=['POST'])
 def claim():
@@ -186,8 +157,11 @@ def claim():
             grant_internet(ip)
             return redirect('/')
         else:
-            return "No internet time to claim, insert bottle first", 400
+            return "No internet time to claim. Insert a bottle first.", 400
 
 if __name__ == '__main__':
-    threading.Thread(target=internet_timer, daemon=True).start()
-    app.run(host='0.0.0.0', port=80)
+    try:
+        threading.Thread(target=internet_timer, daemon=True).start()
+        app.run(host='0.0.0.0', port=80)
+    finally:
+        pi.stop()
