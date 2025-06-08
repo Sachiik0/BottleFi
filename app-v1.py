@@ -7,19 +7,17 @@ from ultralytics import YOLO
 from hx711 import HX711
 import pigpio
 
-# Flask app
 app = Flask(__name__)
 
-# Load YOLOv8n model
-model = YOLO('yolov8n.pt')
+model = YOLO('yolov8n.pt')  # Load YOLO model
 
 # HX711 setup
-hx = HX711(5, 6)  # DOUT = 5, PD_SCK = 6
-hx.set_scale(2280)  # Adjust after calibration
+hx = HX711(5, 6)
+hx.set_scale(2280)
 hx.tare()
 print("HX711 tared. Ready to measure weight.")
 
-# pigpio setup for servo
+# pigpio for servo control
 SERVO_GPIO = 17
 pi = pigpio.pi()
 if not pi.connected:
@@ -34,11 +32,10 @@ def activate_servo():
     pi.set_servo_pulsewidth(SERVO_GPIO, 0)
     print("Servo movement complete")
 
-# Track user internet time
+# Track internet time
 user_times = {}
 lock = threading.Lock()
 
-# HTML template
 HTML_PAGE = """
 <html><body>
 <h2>Welcome to BottleScan Captive Portal</h2>
@@ -58,26 +55,26 @@ def get_client_ip():
 
 def grant_internet(ip):
     subprocess.run(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"Granted internet to {ip}")
+    print(f"[+] Granted internet to {ip}")
 
 def block_internet(ip):
+    # Remove and re-add rule to ensure blocking
     subprocess.run(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["sudo", "iptables", "-I", "FORWARD", "-s", ip, "-j", "DROP"])
-    print(f"Blocked internet to {ip}")
+    print(f"[-] Blocked internet to {ip}")
 
 def internet_timer():
     while True:
         time.sleep(1)
         with lock:
             expired_ips = []
-            for ip, seconds in user_times.items():
-                if seconds > 0:
+            for ip in list(user_times):
+                if user_times[ip] > 0:
                     user_times[ip] -= 1
-                if user_times[ip] <= 0:
-                    block_internet(ip)
-                    expired_ips.append(ip)
-            for ip in expired_ips:
-                del user_times[ip]
+                    if user_times[ip] == 0:
+                        block_internet(ip)
+                        print(f"[!] Time expired for {ip}")
+            # Don't delete the IP so they stay blocked and visible on the page
 
 def scan_bottle(timeout=5, max_weight=150):
     cap = cv2.VideoCapture(0)
@@ -97,11 +94,10 @@ def scan_bottle(timeout=5, max_weight=150):
         results = model(frame)[0]
         for box in results.boxes:
             cls = int(box.cls.cpu().numpy())
-            if cls == 39:
+            if cls == 39:  # Bottle class
                 bbox = box.xyxy[0].cpu().numpy()
                 xmin, ymin, xmax, ymax = bbox
-                width = xmax - xmin
-                height = ymax - ymin
+                width, height = xmax - xmin, ymax - ymin
 
                 if width > 100 or height > 340:
                     print(f"Bottle detected: {width:.1f}x{height:.1f}")
@@ -134,16 +130,15 @@ def index():
     ip = get_client_ip()
     with lock:
         if ip not in user_times:
-            block_internet(ip)
             user_times[ip] = 0
+            block_internet(ip)  # Force block immediately on first visit
         time_left = user_times[ip]
     return render_template_string(HTML_PAGE, ip=ip, time_left=time_left)
 
 @app.route('/insert', methods=['POST'])
 def insert():
     ip = get_client_ip()
-    bottle_detected = scan_bottle()
-    if bottle_detected:
+    if scan_bottle():
         with lock:
             user_times[ip] = user_times.get(ip, 0) + 60
             hx.tare()
@@ -155,7 +150,7 @@ def insert():
 
 if __name__ == '__main__':
     try:
-        subprocess.run(["sudo", "iptables", "-F", "FORWARD"])  # Clear old iptables rules
+        subprocess.run(["sudo", "iptables", "-F", "FORWARD"])  # Clear iptables on start
         threading.Thread(target=internet_timer, daemon=True).start()
         app.run(host='0.0.0.0', port=80)
     finally:
