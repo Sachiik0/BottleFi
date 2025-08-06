@@ -1,155 +1,106 @@
-# BottleDetect: Smart Bottle Scanner with Internet Access Control
+# BottleFi
 
-This project allows Raspberry Pi 4B to detect bottle insertions using object detection (YOLOv8), weight sensing (HX711), and servo actuation. Users are granted temporary internet access through IP-based firewall rules when a valid bottle is inserted.
+BottleFi is a smart recycling kiosk that incentivizes plastic bottle disposal by granting internet access time to users. It operates on a Raspberry Pi with a connected weight sensor and optional internet access control.
 
----
+## Features
 
-## 📦 Features
+- Scan bottles and accumulate time
+- Generate time codes based on scans
+- Redeem codes to gain internet access
+- Kiosk and user-friendly web interfaces
 
-* Detects plastic bottles using YOLOv8.
-* Validates bottle weight using HX711 load cell.
-* Grants 1 minute of internet access per bottle.
-* Controls internet access using `iptables`.
-* Servo actuation simulates bottle intake.
-* Simple web interface for interaction.
+## Requirements
 
----
+- Raspberry Pi (tested on RPi 4)
+- Load Cell + HX711
+- Internet access (via router or hotspot)
+- Python 3
+- Flask
+- GPIO access libraries (`RPi.GPIO` or `gpiozero`)
+- Chromium (for kiosk display)
 
-## 🧰 Hardware Requirements
-
-* Raspberry Pi 4B
-* USB webcam
-* HX711 module + Load cell
-* Servo motor (SG90)
-* Breadboard + jumper wires
-
----
-
-## 🔧 Software Requirements
-
-### 🐍 Python Dependencies
-
-Install all Python dependencies with:
+## Installation
 
 ```bash
-pip install -r requirements.txt
+# Clone the repository
+git clone https://github.com/Sachiik0/BottleFi.git
+cd BottleFi
+
+# Install dependencies
+sudo apt update
+sudo apt install python3-pip python3-flask chromium-browser
+pip3 install flask
+
+# Optional: Install GPIO libraries if not already installed
+sudo apt install python3-rpi.gpio
+
+# Enable necessary services
+sudo systemctl enable pigpiod.service
+sudo systemctl start pigpiod.service
 ```
 
-**requirements.txt**:
+## Autostart Configuration
 
-```txt
-flask
-opencv-python
-ultralytics
-RPi.GPIO
-gx711
-```
+To launch BottleFi automatically on boot in kiosk mode:
 
-> 💡 Note: If `hx711` is not found in PyPI, use a GitHub repo or manually install the library you're using.
+### 1. Kiosk Autostart for Chromium
 
----
-
-## 🚀 Setup Instructions
-
-### 1. 🔌 Prepare the Raspberry Pi
+Edit the autostart file:
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install python3-pip python3-opencv git iptables -y
+sudo nano /etc/xdg/lxsession/LXDE-pi/autostart
 ```
 
-### 2. 🧠 Clone this repository
+Add the following lines at the end:
+
+```
+@xset s off
+@xset -dpms
+@xset s noblank
+@chromium-browser --noerrdialogs --kiosk http://localhost:5000/kiosk-page
+```
+
+### 2. Start the Flask App Automatically
+
+Create a shell script `bottle-detect.sh`:
 
 ```bash
-git clone https://github.com/yourusername/bottledetect.git
-cd bottledetect
+nano ~/bottle-detect.sh
 ```
 
-### 3. 🔽 Install Python Dependencies
+Insert:
 
 ```bash
-pip3 install -r requirements.txt
+#!/bin/bash
+cd ~/BottleFi
+flask run --host=0.0.0.0 --port=5000
 ```
 
-### 4. 🧠 Download YOLOv8 Model
+Make it executable:
 
 ```bash
-# Model used: yolov8n (nano version)
-python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+chmod +x ~/bottle-detect.sh
 ```
 
----
-
-## 🧪 Test the Application
-
-Run the Flask app:
+Then add it to `.bashrc` to run on terminal login:
 
 ```bash
-sudo python3 app.py
+nano ~/.bashrc
 ```
 
-Visit `http://<RPI-IP>` in your browser.
+Add this line at the bottom:
 
----
-
-## ⚙️ Set Up as a Systemd Service
-
-Create a systemd service file:
-
-```ini
-# /etc/systemd/system/bottledetect.service
-[Unit]
-Description=BottleDetect Flask Service
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /home/pi/bottledetect/app.py
-WorkingDirectory=/home/pi/bottledetect
-StandardOutput=inherit
-StandardError=inherit
-Restart=always
-User=pi
-
-[Install]
-WantedBy=multi-user.target
+```
+bash ~/bottle-detect.sh &
 ```
 
-Enable and start:
+## Usage
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable bottledetect.service
-sudo systemctl start bottledetect.service
-sudo systemctl status bottledetect.service
-```
+- Go to your Kiosk screen and scan bottles
+- Time will accumulate
+- Generate a time code when you're done
+- Users can go to the user page and input the code to claim internet time
 
-Check logs:
+## Repository
 
-```bash
-journalctl -u bottledetect.service -f
-```
-
----
-
-## 📡 SSH into Raspberry Pi
-
-```bash
-ssh pi@<RPI-IP>
-```
-
-Replace `<RPI-IP>` with your Raspberry Pi's actual IP address.
-
----
-
-## 🔒 IPTables Setup
-
-Ensure the default rule is to block all forwarded IPs:
-
-```bash
-sudo iptables -P FORWARD DROP
-```
-
-The app automatically manages IP rules using:
-
-* `iptables -D FORWARD -s <ip> -j DROP` (remove drop rule)
-* `iptables -I FORWARD -s <ip> -j DROP` (insert drop rule)
+https://github.com/Sachiik0/BottleFi
